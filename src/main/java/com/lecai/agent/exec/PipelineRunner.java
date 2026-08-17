@@ -13,6 +13,8 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -24,14 +26,12 @@ import java.util.concurrent.Executors;
  * correctness summary comparing the in-memory AgentStats count, the actual
  * Postgres count, and the expected count.
  *
- * Every database write is logged with a millisecond-precision start/end
- * timestamp specifically so overlap between threads is provable by reading
- * the log, not just asserted: if one task's WRITE START timestamp falls
- * before another task's WRITE END timestamp, those two writes were
- * genuinely in flight against the same row at the same time -- and the
- * final count is still exactly correct. That is the actual proof of
- * concurrency correctness this project makes, deliberately without a
- * separately-broken code path to compare against.
+ * Each task's line prints the live in-memory AgentStats totals at the
+ * moment it finished, not just a final tally -- watching multiple different
+ * thread names interleave while the count climbs by exactly one per task,
+ * every time, is the actual proof of concurrency correctness this project
+ * makes, deliberately without a separately-broken code path to compare
+ * against.
  *
  * Explicitly calls System.exit(0) at the end: google-genai's internal HTTP
  * client (used by every TaskReviewer.review() call) leaves a connection-pool
@@ -43,15 +43,36 @@ import java.util.concurrent.Executors;
 public final class PipelineRunner {
 
     private static final int WORKER_COUNT = 5;
+    private static final int MIN_REQUIRED_TASKS = 10;
+    private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
 
+    /**
+     * Usage: java ... PipelineRunner [taskLimit]
+     * With no argument, processes every fetched task. With a number, caps
+     * the run to that many tasks (useful for a shorter demo run that still
+     * clears the assessment's minimum of 10 fetched/classified tasks).
+     */
     public static void main(String[] args) throws InterruptedException {
         System.out.println("=== lec-ai-agent pipeline run (workers=" + WORKER_COUNT + ") ===");
 
         HikariDataSource dataSource = DbConfig.createDataSource();
         resetAgentStats(dataSource);
 
-        List<Task> tasks = new TaskFetcher().fetchAll();
-        System.out.println("Fetched " + tasks.size() + " tasks. Starting concurrent pipeline...\n");
+        List<Task> allTasks = new TaskFetcher().fetchAll();
+        List<Task> tasks = applyLimit(allTasks, args);
+
+        if (tasks.size() < MIN_REQUIRED_TASKS) {
+            System.out.println("WARNING: only " + tasks.size() + " task(s) will be processed this run, "
+                    + "below the assessment's minimum of " + MIN_REQUIRED_TASKS + ". "
+                    + (allTasks.size() < MIN_REQUIRED_TASKS
+                            ? "The GitHub fetch likely failed or returned too few issues -- rerun, "
+                                    + "or check GitHubIssueFetcher's output above."
+                            + " (Total fetched: " + allTasks.size() + ".)"
+                            : "Raise the task limit argument to at least " + MIN_REQUIRED_TASKS + "."));
+        }
+
+        System.out.println("Fetched " + allTasks.size() + " tasks total, processing " + tasks.size()
+                + ". Starting concurrent pipeline...\n");
 
         AgentStats stats = new AgentStats();
         ExecutorService pool = Executors.newFixedThreadPool(WORKER_COUNT);
@@ -80,20 +101,34 @@ public final class PipelineRunner {
 
         TaskDecision decision = TaskReviewer.review(task.fullText());
 
-        long writeStart = System.currentTimeMillis();
-        System.out.printf("[%s] [%d] DB WRITE START task=%s%n", threadName, writeStart, task.id());
         DatabaseTool.recordOutcome(decision.flaggedUnsafe(), decision.reason());
-        long writeEnd = System.currentTimeMillis();
-        System.out.printf("[%s] [%d] DB WRITE END   task=%s (%dms)%n",
-                threadName, writeEnd, task.id(), writeEnd - writeStart);
 
         Timestamp finishedAt = new Timestamp(System.currentTimeMillis());
         TaskLogWriter.log(dataSource, task.id(), decision.flaggedUnsafe(), decision.reason(),
                 threadName, startedAt, finishedAt);
         stats.record(decision.flaggedUnsafe());
 
-        System.out.printf("[%s] done: %-24s flaggedUnsafe=%-5b fallback=%-5b processedSoFar=%d%n",
-                threadName, task.id(), decision.flaggedUnsafe(), decision.usedFallback(), stats.processed());
+        String verdict = decision.flaggedUnsafe() ? "UNSAFE" : "SAFE";
+        String source = decision.usedFallback() ? "FALLBACK" : "AGENT";
+        System.out.printf("[%s] [%s] %-24s -> %-6s [%s] | processed=%d safe=%d unsafe=%d%n",
+                threadName, CLOCK.format(LocalTime.now()), task.id(), verdict, source,
+                stats.processed(), stats.safe(), stats.unsafe());
+        System.out.printf("[%s] [%s]   -> Reason: %s%n",
+                threadName, CLOCK.format(LocalTime.now()), decision.reason());
+    }
+
+    private static List<Task> applyLimit(List<Task> tasks, String[] args) {
+        if (args.length == 0) {
+            return tasks;
+        }
+        int limit;
+        try {
+            limit = Integer.parseInt(args[0]);
+        } catch (NumberFormatException e) {
+            System.err.println("Ignoring invalid task limit argument \"" + args[0] + "\" (not a number).");
+            return tasks;
+        }
+        return tasks.size() > limit ? tasks.subList(0, limit) : tasks;
     }
 
     private static void resetAgentStats(HikariDataSource dataSource) throws InterruptedException {

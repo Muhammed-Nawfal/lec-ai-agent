@@ -24,6 +24,29 @@ public class GitHubIssueFetcher {
     private static final int MAX_PER_PAGE = 100;
 
     public List<Task> fetchIssues(String owner, String repo, int limit) {
+        // GitHub's API occasionally 5xx's transiently (observed 504s in testing);
+        // one retry after a short pause resolves most of those without giving up
+        // GitHub tasks entirely and falling back to a synthetic-only run.
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            try {
+                List<Task> issues = attemptFetch(owner, repo);
+                if (issues != null) {
+                    return issues.size() > limit ? issues.subList(0, limit) : issues;
+                }
+            } catch (IOException | InterruptedException e) {
+                System.err.println("[GitHubIssueFetcher] Attempt " + attempt + " failed for " + owner + "/" + repo
+                        + " (" + e.getMessage() + ")");
+            }
+            if (attempt == 1) {
+                sleepBeforeRetry();
+            }
+        }
+        System.err.println("[GitHubIssueFetcher] Giving up after 2 attempts for " + owner + "/" + repo
+                + ", proceeding with 0 GitHub tasks.");
+        return List.of();
+    }
+
+    private List<Task> attemptFetch(String owner, String repo) throws IOException, InterruptedException {
         URI uri = URI.create("https://api.github.com/repos/" + owner + "/" + repo
                 + "/issues?state=open&per_page=" + MAX_PER_PAGE);
         HttpRequest request = HttpRequest.newBuilder()
@@ -33,19 +56,20 @@ public class GitHubIssueFetcher {
                 .GET()
                 .build();
 
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() != 200) {
+            System.err.println("[GitHubIssueFetcher] Unexpected status " + response.statusCode()
+                    + " fetching issues for " + owner + "/" + repo);
+            return null;
+        }
+        return parseIssues(response.body());
+    }
+
+    private void sleepBeforeRetry() {
         try {
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() != 200) {
-                System.err.println("[GitHubIssueFetcher] Unexpected status " + response.statusCode()
-                        + " fetching issues for " + owner + "/" + repo + ", proceeding with 0 GitHub tasks.");
-                return List.of();
-            }
-            List<Task> issues = parseIssues(response.body());
-            return issues.size() > limit ? issues.subList(0, limit) : issues;
-        } catch (IOException | InterruptedException e) {
-            System.err.println("[GitHubIssueFetcher] Failed to fetch issues for " + owner + "/" + repo
-                    + " (" + e.getMessage() + "), proceeding with 0 GitHub tasks.");
-            return List.of();
+            Thread.sleep(1500);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 

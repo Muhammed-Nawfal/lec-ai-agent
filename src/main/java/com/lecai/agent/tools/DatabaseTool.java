@@ -1,6 +1,5 @@
 package com.lecai.agent.tools;
 
-import com.google.adk.tools.Annotations.Schema;
 import com.lecai.agent.db.DbConfig;
 import com.zaxxer.hikari.HikariDataSource;
 
@@ -10,6 +9,16 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.Map;
 
+/**
+ * Performs the single atomic UPDATE ... RETURNING statement that increments
+ * the shared agent_stats row. Not an ADK tool and never called directly by
+ * the LLM -- only the deterministic orchestrator (PipelineRunner,
+ * StressTestRunner) calls this, exactly once per task, after reading the
+ * agent's decision back from DecisionTool. That split exists because
+ * testing showed the agent could call a write-capable tool more than once
+ * per task; DecisionTool is side-effect-free so that no longer matters, and
+ * this class is now the only thing that ever touches agent_stats.
+ */
 public class DatabaseTool {
 
     private static final HikariDataSource DATA_SOURCE = DbConfig.createDataSource();
@@ -21,22 +30,7 @@ public class DatabaseTool {
                     + "WHERE id = 1 "
                     + "RETURNING issues_processed, issues_flagged_unsafe";
 
-    @Schema(description = "Records a task's final outcome by atomically incrementing the shared "
-            + "agent_stats counters in Postgres: issues_processed always increases by 1, and "
-            + "issues_flagged_unsafe increases by 1 only if flaggedUnsafe is true. Call this exactly "
-            + "once, after you have reached your final decision for the task -- not before, and not "
-            + "as a signal to reason about. Pass a short, one-sentence reason explaining the decision; "
-            + "it is not stored in agent_stats, but the orchestrator reads it back from this call to "
-            + "log why you decided what you did.")
-    public static Map<String, Object> recordOutcome(
-            @Schema(name = "flaggedUnsafe",
-                    description = "true if the task's final decision was unsafe/rejected, false if approved as safe.",
-                    optional = false)
-            boolean flaggedUnsafe,
-            @Schema(name = "reason",
-                    description = "A short, one-sentence explanation of why this decision was reached.",
-                    optional = false)
-            String reason) {
+    public static Map<String, Object> recordOutcome(boolean flaggedUnsafe, String reason) {
         try (Connection conn = DATA_SOURCE.getConnection();
              PreparedStatement stmt = conn.prepareStatement(UPDATE_SQL)) {
             stmt.setBoolean(1, flaggedUnsafe);

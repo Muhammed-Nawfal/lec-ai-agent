@@ -26,6 +26,8 @@ public final class TaskReviewer {
 
     public static TaskDecision review(String taskText) {
         try {
+            GeminiRateLimiter.acquire();
+
             InMemoryRunner runner = new InMemoryRunner(AGENT);
             Session session = runner.sessionService()
                     .createSession(runner.appName(), "lec-ai-agent-" + UUID.randomUUID())
@@ -36,16 +38,16 @@ public final class TaskReviewer {
 
             Optional<TaskDecision> decision = runner
                     .runAsync(session.userId(), session.id(), userMsg, runConfig)
-                    .timeout(30, TimeUnit.SECONDS)
+                    .timeout(90, TimeUnit.SECONDS)
                     .toList()
                     .blockingGet()
                     .stream()
                     .flatMap(event -> event.functionCalls().stream())
-                    .filter(call -> "recordOutcome".equals(call.name().orElse("")))
+                    .filter(call -> "recordDecision".equals(call.name().orElse("")))
                     .findFirst()
                     .map(TaskReviewer::toDecision);
 
-            return decision.orElseGet(() -> fallback(taskText, "Agent did not call recordOutcome."));
+            return decision.orElseGet(() -> fallback(taskText, "Agent did not call recordDecision."));
         } catch (Exception e) {
             return fallback(taskText, "LLM call failed: " + e.getMessage());
         }
