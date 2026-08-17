@@ -67,7 +67,11 @@ Two deliberate design choices worth knowing:
 
 ## Concurrency correctness: the actual proof
 
-The shared resource is a single-row `agent_stats` table (`issues_processed`, `issues_flagged_unsafe`), updated with one atomic statement:
+Every task runs through the pipeline concurrently, across 5 worker threads, each touching the same shared counter (`AgentStats`) that could get corrupted if two threads land on it at the same instant. The proof is watching it happen live: run `PipelineRunner` and the terminal prints that in-memory counter updating after every task, with genuinely different thread names interleaved in the log — real concurrent threads, not a simulated sequence — and the count climbs by exactly one per task, every time, no drops, no duplicates.
+
+`AgentStats` is protected with `synchronized` methods — Java's own mutual-exclusion tool, used specifically because multiple threads share this one in-memory object at once: only one thread can execute a synchronized method on it at a time, so an increment can never get lost to another thread's concurrent increment.
+
+The same outcome also gets written to Postgres (a single-row `agent_stats` table), as a second, independent record of the same live run:
 
 ```sql
 UPDATE agent_stats
@@ -77,19 +81,14 @@ WHERE id = 1
 RETURNING issues_processed, issues_flagged_unsafe;
 ```
 
-`UPDATE ... RETURNING` in one round trip means there's no separate read-then-write gap for two threads to interleave into — the increment and the read-back happen as one atomic operation at the database level.
+Every `PipelineRunner` run ends with a summary comparing the in-memory count, the Postgres count, and the expected count — all three have matched exactly on every run tested.
 
-This is proven two different ways:
-
-1. **`PipelineRunner`** — a real run against real data prints the live in-memory counter after every task, across 5 concurrent workers with genuinely different thread names interleaved in the log, and a final summary comparing that in-memory count against Postgres's actual count and the expected total.
-2. **`StressTestRunner`** — repeats the same many-tasks-at-once scenario (17 tasks, 8 workers, no artificial delay) 50 times in a row, using `RuleCheckTool` directly rather than the live LLM (the LLM's reasoning correctness is already proven separately; re-running it here would only add rate-limit latency without testing anything new about the counter). Freshly re-run for this README:
+As an additional repeated check, `StressTestRunner` runs the same many-tasks-at-once scenario (17 tasks, 8 workers, no artificial delay) 50 times in a row, using `RuleCheckTool` directly rather than the live LLM (the LLM's reasoning correctness is already proven separately; re-running it here would only add rate-limit latency without testing anything new about the counter). Freshly re-run for this README:
 
 ```
 === Chaos test results (50 runs, 17 tasks/run, 8 workers/run) ===
 ATOMIC: 0 / 50 runs had a lost update
 ```
-
-Zero failures across 50 repeated adversarial-concurrency runs.
 
 ## How to run it
 
