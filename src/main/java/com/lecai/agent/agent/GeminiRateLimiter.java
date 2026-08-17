@@ -21,13 +21,21 @@ import java.util.concurrent.TimeUnit;
  * with some margin. It cannot pace the calls *within* one task's multi-turn
  * conversation -- ADK doesn't expose a hook for that -- only how many tasks
  * begin per minute.
+ *
+ * Starts with only 1 permit available, not MAX_PERMITS -- a Semaphore
+ * constructed with N permits makes all N available immediately, which would
+ * let 5 tasks begin simultaneously at the very start of a run before any
+ * pacing has happened at all (confirmed causing 429s in testing even on a
+ * fresh API key/quota). Starting at 1 and building up via the same 12s
+ * refill schedule spreads the very first tasks out too, not just later ones.
  */
 public final class GeminiRateLimiter {
 
     private static final int MAX_PERMITS = 5;
+    private static final int INITIAL_PERMITS = 1;
     private static final int REFILL_INTERVAL_SECONDS = 12;
 
-    private static final Semaphore PERMITS = new Semaphore(MAX_PERMITS);
+    private static final Semaphore PERMITS = new Semaphore(INITIAL_PERMITS);
     private static final ScheduledExecutorService REFILL_SCHEDULER =
             Executors.newSingleThreadScheduledExecutor(runnable -> {
                 Thread thread = new Thread(runnable, "gemini-rate-limiter-refill");
