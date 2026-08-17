@@ -112,7 +112,7 @@ Zero failures across 50 repeated adversarial-concurrency runs.
 2. When creating it, **uncheck "Automatically expose new tables"** and consider disabling "Enable Data API" entirely — this project talks to Postgres directly over JDBC, not through Supabase's REST layer, so that layer is unused attack surface.
 3. Save the database password somewhere safe immediately — Supabase only shows it once.
 4. Once created: **Project Settings → Database → Connection string**, and use the **Session pooler** tab (not "Direct connection" — that's IPv6-only on the free tier and often fails to connect from ordinary networks).
-5. Run this in the Supabase SQL editor:
+5. Run this in the Supabase SQL editor (also available as [`sql/schema.sql`](sql/schema.sql)):
 
 ```sql
 CREATE TABLE IF NOT EXISTS agent_stats (
